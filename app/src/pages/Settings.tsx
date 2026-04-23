@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import { trpc } from "@/providers/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -5,7 +6,19 @@ import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { LogOut, User, Shield, Bell, Monitor, Github, RefreshCw } from "lucide-react";
+import {
+  LogOut,
+  User,
+  Shield,
+  Bell,
+  Monitor,
+  Github,
+  RefreshCw,
+  CheckCircle,
+  XCircle,
+  Loader2,
+  AlertTriangle,
+} from "lucide-react";
 import { useNavigate } from "react-router";
 
 export default function Settings() {
@@ -93,29 +106,8 @@ export default function Settings() {
         </CardContent>
       </Card>
 
-      {/* GitHub Connection */}
-      <Card>
-        <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-semibold flex items-center gap-2">
-            <Github className="w-4 h-4" />
-            GitHub
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-4 pt-0">
-          <p className="text-xs text-muted-foreground mb-2">
-            Los repositorios se monitorean mediante simulación de API. En producción, conecta tu token de GitHub.
-          </p>
-          <Button
-            size="sm"
-            variant="outline"
-            className="w-full"
-            onClick={() => navigate("/repos")}
-          >
-            <Github className="w-4 h-4 mr-2" />
-            Gestionar repositorios
-          </Button>
-        </CardContent>
-      </Card>
+      {/* GitHub Connection - NUEVO */}
+      <GitHubSettingsCard />
 
       {/* Notifications */}
       <Card>
@@ -164,6 +156,93 @@ export default function Settings() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+// ─── NUEVO COMPONENTE: GitHub Settings Card ─────────────────────────────────
+
+function GitHubSettingsCard() {
+  const { data: tokenStatus, isLoading: statusLoading } =
+    trpc.github.getGitHubTokenStatus.useQuery();
+  const testMutation = trpc.github.testGitHubConnection.useMutation();
+
+  const isConfigured = tokenStatus?.configured ?? false;
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <Github className="w-4 h-4" />
+          GitHub
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="p-4 pt-0 flex flex-col gap-3">
+        {/* Estado del token */}
+        <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/50">
+          {statusLoading ? (
+            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          ) : isConfigured ? (
+            <CheckCircle className="h-5 w-5 text-green-500 shrink-0" />
+          ) : (
+            <XCircle className="h-5 w-5 text-red-500 shrink-0" />
+          )}
+          <div className="min-w-0">
+            <p className="text-xs font-medium">
+              {statusLoading
+                ? "Comprobando..."
+                : isConfigured
+                ? "Token configurado"
+                : "Token no configurado"}
+            </p>
+            <p className="text-[10px] text-muted-foreground">
+              {isConfigured
+                ? "La sincronización con la API de GitHub está activa."
+                : "Añade GITHUB_TOKEN en las variables de entorno para sincronizar repositorios reales."}
+            </p>
+          </div>
+        </div>
+
+        {/* Botón probar conexión */}
+        <Button
+          size="sm"
+          variant="outline"
+          className="w-full"
+          onClick={() => testMutation.mutate()}
+          disabled={!isConfigured || testMutation.isPending}
+        >
+          {testMutation.isPending ? (
+            <>
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              Probando...
+            </>
+          ) : (
+            <>
+              <Github className="w-4 h-4 mr-2" />
+              Probar conexión
+            </>
+          )}
+        </Button>
+
+        {/* Resultado de la prueba */}
+        {testMutation.isSuccess && (
+          <div className="flex items-center gap-2 rounded-md bg-green-50 dark:bg-green-950 px-3 py-2 text-xs text-green-800 dark:text-green-200">
+            <CheckCircle className="h-4 w-4 shrink-0" />
+            <span className="truncate">
+              Conectado como <strong>@{testMutation.data.username}</strong>
+              {testMutation.data.displayName !== testMutation.data.username &&
+                ` (${testMutation.data.displayName})`}
+            </span>
+          </div>
+        )}
+
+        {testMutation.isError && (
+          <div className="flex items-center gap-2 rounded-md bg-red-50 dark:bg-red-950 px-3 py-2 text-xs text-red-800 dark:text-red-200">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <span className="truncate">{testMutation.error.message}</span>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
