@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { createRouter, authedQuery } from "./middleware";
+import { env } from "./lib/env";
 import {
   findReposByUser,
   findRepoById,
@@ -21,97 +22,172 @@ import {
 import { createAlert } from "./queries/alerts";
 import { createLog } from "./queries/monitoringLogs";
 
-// Simulated GitHub API fetch - in production, replace with actual GitHub API calls
-async function simulateGitHubFetch(owner: string, name: string) {
-  // Mock data simulating GitHub API response
-  const mockIssues = [
-    {
-      id: Math.floor(Math.random() * 1000000),
-      number: Math.floor(Math.random() * 200) + 1,
-      title: "Memory leak in user authentication flow",
-      body: "Detected memory leak when processing concurrent auth requests...",
-      state: "open" as const,
-      labels: ["bug", "high-priority", "security"],
-      author: "dev-team",
-      html_url: `https://github.com/${owner}/${name}/issues/1`,
-      comments: 3,
-      created_at: new Date(Date.now() - 86400000 * 2).toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-    {
-      id: Math.floor(Math.random() * 1000000),
-      number: Math.floor(Math.random() * 200) + 1,
-      title: "CSS rendering issue on mobile Safari",
-      body: "Flexbox layout breaks on iPhone 14 Pro Max...",
-      state: "open" as const,
-      labels: ["bug", "ui", "mobile"],
-      author: "frontend-dev",
-      html_url: `https://github.com/${owner}/${name}/issues/2`,
-      comments: 1,
-      created_at: new Date(Date.now() - 86400000 * 5).toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-    {
-      id: Math.floor(Math.random() * 1000000),
-      number: Math.floor(Math.random() * 200) + 1,
-      title: "Database connection timeout under load",
-      body: "Connection pool exhausted during peak hours...",
-      state: "open" as const,
-      labels: ["bug", "performance", "critical"],
-      author: "backend-dev",
-      html_url: `https://github.com/${owner}/${name}/issues/3`,
-      comments: 7,
-      created_at: new Date(Date.now() - 86400000 * 1).toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-    {
-      id: Math.floor(Math.random() * 1000000),
-      number: Math.floor(Math.random() * 200) + 1,
-      title: "TypeScript type inference broken after update",
-      body: "Generic types not resolving correctly in v5.0...",
-      state: "open" as const,
-      labels: ["bug", "typescript"],
-      author: "type-master",
-      html_url: `https://github.com/${owner}/${name}/issues/4`,
-      comments: 2,
-      created_at: new Date(Date.now() - 86400000 * 3).toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-  ];
+// ─── GitHub API helpers ─────────────────────────────────────────────────────
 
-  const mockPRs = [
-    {
-      id: Math.floor(Math.random() * 1000000),
-      number: Math.floor(Math.random() * 100) + 1,
-      title: "Fix: Resolve memory leak in auth middleware",
-      body: "Implemented proper cleanup for session objects...",
-      state: "open" as const,
-      author: "backend-dev",
-      html_url: `https://github.com/${owner}/${name}/pull/1`,
-      additions: 45,
-      deletions: 12,
-      changed_files: 3,
-      created_at: new Date(Date.now() - 86400000 * 1).toISOString(),
-      merged_at: null,
-    },
-    {
-      id: Math.floor(Math.random() * 1000000),
-      number: Math.floor(Math.random() * 100) + 1,
-      title: "Refactor: Optimize database queries",
-      body: "Added indexes and reduced N+1 queries...",
-      state: "open" as const,
-      author: "db-expert",
-      html_url: `https://github.com/${owner}/${name}/pull/2`,
-      additions: 120,
-      deletions: 45,
-      changed_files: 8,
-      created_at: new Date(Date.now() - 86400000 * 2).toISOString(),
-      merged_at: null,
-    },
-  ];
+const GITHUB_API_BASE = "https://api.github.com";
 
-  return { issues: mockIssues, pullRequests: mockPRs };
+function getGitHubHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "github-guardian",
+  };
+  if (env.githubToken) {
+    headers.Authorization = `Bearer ${env.githubToken}`;
+  }
+  return headers;
 }
+
+function handleGitHubError(status: number, endpoint: string): never {
+  if (status === 404) {
+    throw new Error("Repositorio no encontrado o sin acceso con el token configurado");
+  }
+  if (status === 401 || status === 403) {
+    throw new Error("Token de GitHub inválido o sin permisos");
+  }
+  if (status === 429) {
+    throw new Error("Rate limit excedido, reintenta en unos minutos");
+  }
+  throw new Error(`Error de la API de GitHub (${status}) en ${endpoint}`);
+}
+
+async function githubFetch<T>(url: string): Promise<T> {
+  const res = await fetch(url, { headers: getGitHubHeaders() });
+  if (!res.ok) {
+    handleGitHubError(res.status, url);
+  }
+  return res.json() as Promise<T>;
+}
+
+// GitHub API raw response types
+interface GitHubIssueRaw {
+  id: number;
+  number: number;
+  title: string;
+  body: string | null;
+  state: string;
+  labels: Array<{ name: string }>;
+  user: { login: string } | null;
+  html_url: string;
+  comments: number;
+  created_at: string;
+  updated_at: string;
+  pull_request?: unknown;
+}
+
+interface GitHubPullRaw {
+  id: number;
+  number: number;
+  title: string;
+  body: string | null;
+  state: string;
+  user: { login: string } | null;
+  html_url: string;
+  additions: number;
+  deletions: number;
+  changed_files: number;
+  created_at: string;
+  merged_at: string | null;
+}
+
+interface GitHubRepoInfo {
+  description: string | null;
+  language: string | null;
+  stargazers_count: number;
+  open_issues_count: number;
+}
+
+interface MappedIssue {
+  id: number;
+  number: number;
+  title: string;
+  body: string | null;
+  state: "open" | "closed";
+  labels: string[];
+  author: string;
+  html_url: string;
+  comments: number;
+  created_at: string;
+  updated_at: string;
+}
+
+interface MappedPR {
+  id: number;
+  number: number;
+  title: string;
+  body: string | null;
+  state: "open" | "closed";
+  author: string;
+  html_url: string;
+  additions: number;
+  deletions: number;
+  changed_files: number;
+  created_at: string;
+  merged_at: string | null;
+}
+
+async function fetchGitHubData(owner: string, name: string): Promise<{
+  issues: MappedIssue[];
+  pullRequests: MappedPR[];
+}> {
+  if (!env.githubToken) {
+    throw new Error("GITHUB_TOKEN no configurado. Añade el token en las variables de entorno para sincronizar repositorios.");
+  }
+
+  const issuesRaw = await githubFetch<GitHubIssueRaw[]>(
+    `${GITHUB_API_BASE}/repos/${owner}/${name}/issues?state=open&per_page=100`
+  );
+
+  const prsRaw = await githubFetch<GitHubPullRaw[]>(
+    `${GITHUB_API_BASE}/repos/${owner}/${name}/pulls?state=all&per_page=50`
+  );
+
+  const realIssues = issuesRaw.filter((item) => !item.pull_request);
+
+  const issues: MappedIssue[] = realIssues.map((item) => ({
+    id: item.id,
+    number: item.number,
+    title: item.title,
+    body: item.body,
+    state: item.state as "open" | "closed",
+    labels: item.labels.map((l) => l.name),
+    author: item.user?.login ?? "unknown",
+    html_url: item.html_url,
+    comments: item.comments,
+    created_at: item.created_at,
+    updated_at: item.updated_at,
+  }));
+
+  const pullRequests: MappedPR[] = prsRaw.map((item) => ({
+    id: item.id,
+    number: item.number,
+    title: item.title,
+    body: item.body,
+    state: item.state as "open" | "closed",
+    author: item.user?.login ?? "unknown",
+    html_url: item.html_url,
+    additions: item.additions,
+    deletions: item.deletions,
+    changed_files: item.changed_files,
+    created_at: item.created_at,
+    merged_at: item.merged_at,
+  }));
+
+  return { issues, pullRequests };
+}
+
+async function fetchGitHubRepoInfo(owner: string, name: string): Promise<GitHubRepoInfo | null> {
+  if (!env.githubToken) return null;
+  try {
+    return await githubFetch<GitHubRepoInfo>(
+      `${GITHUB_API_BASE}/repos/${owner}/${name}`
+    );
+  } catch {
+    return null;
+  }
+}
+
+// ─── Severity & bug detection (unchanged) ────────────────────────────────────
 
 function detectSeverity(title: string, body: string, labels: string[]): "low" | "medium" | "high" | "critical" {
   const text = (title + " " + body).toLowerCase();
@@ -132,6 +208,8 @@ function hasBugFix(title: string): boolean {
   const text = title.toLowerCase();
   return text.includes("fix") || text.includes("bugfix") || text.includes("resolve") || text.includes("patch");
 }
+
+// ─── Router ────────────────────────────────────────────────────────────────
 
 export const githubRouter = createRouter({
   listRepos: authedQuery.query(({ ctx }) => findReposByUser(ctx.user.id)),
@@ -155,13 +233,19 @@ export const githubRouter = createRouter({
       if (existing) {
         throw new Error("Repository already exists");
       }
+
+      const repoInfo = await fetchGitHubRepoInfo(input.owner, input.name);
+
       return createRepo({
         userId: ctx.user.id,
         owner: input.owner,
         name: input.name,
         fullName,
         url: input.url || `https://github.com/${fullName}`,
-        description: input.description,
+        description: repoInfo?.description ?? input.description ?? null,
+        language: repoInfo?.language ?? null,
+        stars: repoInfo?.stargazers_count ?? null,
+        openIssuesCount: repoInfo?.open_issues_count ?? null,
       });
     }),
 
@@ -197,7 +281,7 @@ export const githubRouter = createRouter({
       });
 
       try {
-        const { issues, pullRequests } = await simulateGitHubFetch(repo.owner, repo.name);
+        const { issues, pullRequests } = await fetchGitHubData(repo.owner, repo.name);
 
         // Sync issues
         for (const issue of issues) {
@@ -211,7 +295,7 @@ export const githubRouter = createRouter({
               labels: issue.labels,
               commentsCount: issue.comments,
               githubUpdatedAt: new Date(issue.updated_at),
-              githubClosedAt: (issue.state as string) === "closed" ? new Date() : undefined,
+              githubClosedAt: issue.state === "closed" ? new Date() : undefined,
             });
           } else {
             const newIssue = await createIssue({
@@ -293,10 +377,17 @@ export const githubRouter = createRouter({
           }
         }
 
+        // ─── FIX: Update repo metadata too ─────────────────────────────
+        const repoInfo = await fetchGitHubRepoInfo(repo.owner, repo.name);
+
         await updateRepo(repo.id, ctx.user.id, {
           lastSyncedAt: new Date(),
           openIssuesCount: issues.filter((i) => i.state === "open").length,
+          description: repoInfo?.description ?? undefined,
+          language: repoInfo?.language ?? undefined,
+          stars: repoInfo?.stargazers_count ?? undefined,
         });
+        // ──────────────────────────────────────────────────────────────
 
         await createLog({
           userId: ctx.user.id,
@@ -327,7 +418,7 @@ export const githubRouter = createRouter({
 
     for (const repo of activeRepos) {
       try {
-        const { issues, pullRequests } = await simulateGitHubFetch(repo.owner, repo.name);
+        const { issues, pullRequests } = await fetchGitHubData(repo.owner, repo.name);
         
         for (const issue of issues) {
           const existing = await findIssueByGithubId(issue.id, repo.id);
@@ -402,9 +493,16 @@ export const githubRouter = createRouter({
           }
         }
 
+        // ─── FIX: Update repo metadata in autoSync too ───────────────
+        const repoInfo = await fetchGitHubRepoInfo(repo.owner, repo.name);
+
         await updateRepo(repo.id, ctx.user.id, {
           lastSyncedAt: new Date(),
+          description: repoInfo?.description ?? undefined,
+          language: repoInfo?.language ?? undefined,
+          stars: repoInfo?.stargazers_count ?? undefined,
         });
+        // ──────────────────────────────────────────────────────────────
 
         results.push({ repo: repo.fullName, success: true, issues: issues.length, prs: pullRequests.length });
       } catch (error) {
@@ -417,5 +515,30 @@ export const githubRouter = createRouter({
     }
 
     return { results, totalRepos: activeRepos.length };
+  }),
+
+  // ─── New: GitHub token status & test ──────────────────────────────────────
+
+  getGitHubTokenStatus: authedQuery.query(() => {
+    return {
+      configured: !!env.githubToken,
+    };
+  }),
+
+  testGitHubConnection: authedQuery.mutation(async () => {
+    if (!env.githubToken) {
+      throw new Error("GITHUB_TOKEN no configurado");
+    }
+    const res = await fetch(`${GITHUB_API_BASE}/user`, {
+      headers: getGitHubHeaders(),
+    });
+    if (!res.ok) {
+      handleGitHubError(res.status, "/user");
+    }
+    const data = await res.json() as { login: string; name?: string };
+    return {
+      username: data.login,
+      displayName: data.name || data.login,
+    };
   }),
 });
